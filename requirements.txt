@@ -1,0 +1,8 @@
+tensorflow>=2.15
+tf_keras
+streamlit>=1.32
+pillow>=10.0
+numpy>=1.24
+pandas>=2.0
+h5py>=3.0
+xlsxwriter>=3.0
