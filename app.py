@@ -36,6 +36,7 @@ import tensorflow as tf
 
 MODEL_PATH = "keras_model.h5"
 LABELS_PATH = "labels.txt"
+METRICAS_PATH = "metricas_modelo.json"
 IMG_SIZE = (224, 224)
 
 HISTORIAL_DIR = "historial"
@@ -213,6 +214,54 @@ def generar_reporte_excel(df):
     return buffer.getvalue()
 
 
+def mostrar_validacion_modelo():
+    """Muestra en la app los indicadores de la evaluación completa del
+    modelo (F1, Precisión, Recall, etc.), calculados una sola vez con
+    evaluar_modelo.py y guardados en metricas_modelo.json. Estos números
+    NO cambian con cada foto: resumen qué tan bien rinde el modelo en
+    general, según pruebas con fotos de respuesta conocida."""
+    if not os.path.isfile(METRICAS_PATH):
+        return
+
+    with open(METRICAS_PATH, "r", encoding="utf-8") as f:
+        m = json.load(f)
+
+    with st.expander("📊 Validación del modelo (para tu informe/tesis)", expanded=False):
+        st.caption(
+            f"Calculado sobre {m['total_imagenes_evaluadas']} imágenes de evaluación "
+            f"con evaluar_modelo.py."
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Accuracy", f"{m['accuracy']*100:.1f}%")
+        c2.metric("F1 (macro)", f"{m['f1_macro']:.3f}")
+        c3.metric("Precisión (macro)", f"{m['precision_macro']:.3f}")
+        c4.metric("Recall (macro)", f"{m['recall_macro']:.3f}")
+
+        c5, c6, c7 = st.columns(3)
+        c5.metric("Cohen's Kappa", f"{m['cohen_kappa']:.3f}")
+        c6.metric("MCC", f"{m['mcc']:.3f}")
+        if m.get("auc_macro") is not None:
+            c7.metric("AUC (macro)", f"{m['auc_macro']:.3f}")
+
+        st.write("**Precisión, Recall y F1 por enfermedad:**")
+        filas = []
+        for clase, valores in m["metricas_por_clase"].items():
+            filas.append({
+                "Clase": clase,
+                "Precisión": valores["precision"],
+                "Recall": valores["recall"],
+                "F1-score": valores["f1_score"],
+                "Fotos evaluadas": valores["soporte"],
+            })
+        st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+
+        if os.path.isfile("matriz_confusion.png"):
+            st.image("matriz_confusion.png", caption="Matriz de confusión")
+        if os.path.isfile("curvas_roc.png"):
+            st.image("curvas_roc.png", caption="Curvas ROC por clase")
+
+
 def mostrar_historial():
     st.subheader("📋 Historial de consultas")
     if not os.path.isfile(HISTORIAL_CSV):
@@ -287,6 +336,8 @@ def main():
             "Nota: la cámara solo funciona por HTTPS o en tu propia laptop — "
             "para usarla desde el celular, publica la app en línea."
         )
+
+    mostrar_validacion_modelo()
 
     try:
         modelo, clases = cargar_modelo()
