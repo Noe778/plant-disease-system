@@ -272,14 +272,28 @@ def evaluar_si_es_planta(imagen_pil, modelo_filtro, clases_filtro):
     return True, None
 
 
+def cargar_metricas_modelo():
+    """Lee metricas_modelo.json si existe. Devuelve None si no está."""
+    if not os.path.isfile(METRICAS_PATH):
+        return None
+    with open(METRICAS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def generar_reporte_excel(df):
     """Genera un archivo Excel con formato (colores, encabezado, anchos de
-    columna) a partir del historial, ya que un .csv plano no admite estilo."""
+    columna). Incluye 3 hojas:
+      1) Historial: cada consulta hecha por el agricultor (lo que ya existía).
+      2) Metricas del Modelo: accuracy, F1, precision, recall, kappa, mcc,
+         MAE, RMSE, R2, etc. — la evaluación general del modelo, para que el
+         asesor tenga los indicadores completos y no solo la confianza por foto.
+      3) Metricas por Clase: precision/recall/f1/soporte de cada enfermedad.
+    """
     buffer = io.BytesIO()
+    m = cargar_metricas_modelo()
+
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Historial")
         libro = writer.book
-        hoja = writer.sheets["Historial"]
 
         formato_encabezado = libro.add_format({
             "bold": True,
@@ -288,6 +302,10 @@ def generar_reporte_excel(df):
             "border": 1,
             "align": "center",
         })
+
+        # --- Hoja 1: Historial de consultas (igual que antes) ---
+        df.to_excel(writer, index=False, sheet_name="Historial")
+        hoja = writer.sheets["Historial"]
         for col_num, nombre_col in enumerate(df.columns):
             hoja.write(0, col_num, nombre_col, formato_encabezado)
             ancho = max(14, len(str(nombre_col)) + 4)
@@ -295,11 +313,64 @@ def generar_reporte_excel(df):
 
         formato_sana = libro.add_format({"bg_color": "#D8F3DC"})
         formato_enferma = libro.add_format({"bg_color": "#FDE8D9"})
-
         col_diagnostico = list(df.columns).index("diagnostico")
         for fila_idx, valor in enumerate(df["diagnostico"], start=1):
             formato = formato_sana if "healthy" in str(valor).lower() else formato_enferma
             hoja.write(fila_idx, col_diagnostico, valor, formato)
+
+        # --- Hoja 2 y 3: métricas del modelo, si metricas_modelo.json existe ---
+        if m is not None:
+            filas_generales = [
+                ("Total de imágenes evaluadas", m.get("total_imagenes_evaluadas")),
+                ("Accuracy", m.get("accuracy")),
+                ("F1 (macro)", m.get("f1_macro")),
+                ("F1 (ponderado)", m.get("f1_ponderado")),
+                ("Precisión (macro)", m.get("precision_macro")),
+                ("Precisión (ponderada)", m.get("precision_ponderada")),
+                ("Recall (macro)", m.get("recall_macro")),
+                ("Recall (ponderado)", m.get("recall_ponderado")),
+                ("Cohen's Kappa", m.get("cohen_kappa")),
+                ("MCC", m.get("mcc")),
+                ("AUC (macro)", m.get("auc_macro")),
+                ("MAE", m.get("mae")),
+                ("RMSE", m.get("rmse")),
+                ("R2", m.get("r2")),
+                ("Confianza promedio en aciertos", m.get("confianza_promedio_aciertos")),
+                ("Confianza promedio en errores", m.get("confianza_promedio_errores")),
+                ("Tiempo de inferencia promedio (ms)", m.get("tiempo_inferencia_promedio_ms")),
+            ]
+            df_general = pd.DataFrame(filas_generales, columns=["Métrica", "Valor"])
+            df_general.to_excel(writer, index=False, sheet_name="Metricas del Modelo")
+            hoja_gen = writer.sheets["Metricas del Modelo"]
+            for col_num, nombre_col in enumerate(df_general.columns):
+                hoja_gen.write(0, col_num, nombre_col, formato_encabezado)
+            hoja_gen.set_column(0, 0, 34)
+            hoja_gen.set_column(1, 1, 16)
+
+            if m.get("mae_rmse_r2_nota"):
+                hoja_gen.write(
+                    len(filas_generales) + 2, 0,
+                    "Nota MAE/RMSE/R2: " + m["mae_rmse_r2_nota"],
+                )
+
+            metricas_clase = m.get("metricas_por_clase")
+            if metricas_clase:
+                filas_clase = []
+                for clase, valores in metricas_clase.items():
+                    filas_clase.append({
+                        "Clase": clase,
+                        "Precisión": valores.get("precision"),
+                        "Recall": valores.get("recall"),
+                        "F1-score": valores.get("f1_score"),
+                        "Soporte (fotos evaluadas)": valores.get("soporte"),
+                    })
+                df_clase = pd.DataFrame(filas_clase)
+                df_clase.to_excel(writer, index=False, sheet_name="Metricas por Clase")
+                hoja_clase = writer.sheets["Metricas por Clase"]
+                for col_num, nombre_col in enumerate(df_clase.columns):
+                    hoja_clase.write(0, col_num, nombre_col, formato_encabezado)
+                    ancho = max(16, len(str(nombre_col)) + 4)
+                    hoja_clase.set_column(col_num, col_num, ancho)
 
     return buffer.getvalue()
 
@@ -333,6 +404,21 @@ def mostrar_validacion_modelo():
         c6.metric("MCC", f"{m['mcc']:.3f}")
         if m.get("auc_macro") is not None:
             c7.metric("AUC (macro)", f"{m['auc_macro']:.3f}")
+
+        if all(k in m for k in ("mae", "rmse", "r2")):
+            st.write("**MAE, RMSE y R² (solicitados para el informe):**")
+            c8, c9, c10 = st.columns(3)
+            c8.metric("MAE", f"{m['mae']:.3f}")
+            c9.metric("RMSE", f"{m['rmse']:.3f}")
+            c10.metric("R²", f"{m['r2']:.3f}")
+            st.caption(
+                "⚠️ Este es un modelo de clasificación, no de regresión: MAE, "
+                "RMSE y R² no son sus métricas nativas (para eso están "
+                "accuracy, F1, precisión y recall, arriba). Aquí se calculan "
+                "comparando la confianza del modelo contra el resultado ideal "
+                "(1 si acertó, 0 si falló), que es como suelen pedirse en "
+                "informes académicos cuando exigen estas 3 métricas."
+            )
 
         st.write("**Precisión, Recall y F1 por enfermedad:**")
         filas = []
