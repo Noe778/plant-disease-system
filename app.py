@@ -42,6 +42,15 @@ IMG_SIZE = (224, 224)
 HISTORIAL_DIR = "historial"
 HISTORIAL_CSV = "historial/registro.csv"
 
+# Modelo binario opcional (Planta / No_Planta), entrenado por separado en
+# Teachable Machine, para filtrar fotos que no son de plantas ANTES de
+# mandarlas al modelo de diagnóstico. Si estos archivos no existen todavía
+# (no lo has entrenado/agregado), la app sigue funcionando y usa como
+# respaldo un filtro simple por color.
+FILTRO_MODEL_PATH = "modelo_filtro.h5"
+FILTRO_LABELS_PATH = "labels_filtro.txt"
+UMBRAL_NO_PLANTA = 60.0  # % mínimo de confianza para bloquear una foto
+
 
 VERDE_HOJA = "#1B4332"
 VERDE_CLARO = "#40916C"
@@ -170,6 +179,23 @@ def cargar_modelo():
     return modelo, clases
 
 
+@st.cache_resource
+def cargar_modelo_filtro():
+    """Carga el modelo binario Planta/No_Planta si ya lo agregaste a la
+    carpeta. Si no existe todavía, devuelve (None, None) sin dar error,
+    para que la app siga funcionando con el filtro de respaldo por color."""
+    if not os.path.isfile(FILTRO_MODEL_PATH) or not os.path.isfile(FILTRO_LABELS_PATH):
+        return None, None
+    try:
+        parchear_modelo_antiguo(FILTRO_MODEL_PATH)
+        modelo = tf.keras.models.load_model(FILTRO_MODEL_PATH, compile=False)
+        with open(FILTRO_LABELS_PATH, "r", encoding="utf-8") as f:
+            clases = [linea.strip().split(" ", 1)[1] for linea in f if linea.strip()]
+        return modelo, clases
+    except Exception:
+        return None, None
+
+
 def preparar_imagen(imagen_pil):
     imagen = ImageOps.fit(imagen_pil.convert("RGB"), IMG_SIZE, Image.Resampling.LANCZOS)
     arr = np.asarray(imagen, dtype=np.float32)
@@ -180,6 +206,70 @@ def preparar_imagen(imagen_pil):
 
 def nombre_legible(nombre_clase):
     return nombre_clase.replace("___", " - ").replace("_", " ")
+
+
+UMBRAL_CONTENIDO_VEGETAL = 8.0  # % mínimo de píxeles "tipo hoja" para aceptar la foto (respaldo)
+
+
+def analizar_contenido_vegetal(imagen_pil, umbral_pct=UMBRAL_CONTENIDO_VEGETAL):
+    """FILTRO DE RESPALDO por color (NO es IA, no requiere entrenar nada):
+    calcula qué porcentaje de píxeles de la imagen caen en tonos típicos
+    de una hoja (verdes, amarillentos y marrones de zonas necrosadas/secas).
+    Se usa solo si todavía no agregaste el modelo binario Planta/No_Planta
+    (modelo_filtro.h5). Es menos preciso: por ejemplo puede confundir piel
+    humana con hojas, porque comparten tonos cafés/marrones.
+
+    Devuelve (es_planta: bool, porcentaje_vegetal: float).
+    """
+    imagen_hsv = imagen_pil.convert("RGB").resize((150, 150)).convert("HSV")
+    arr = np.asarray(imagen_hsv)
+    h = arr[:, :, 0].astype(np.int32)
+    s = arr[:, :, 1].astype(np.int32)
+    v = arr[:, :, 2].astype(np.int32)
+
+    # PIL representa el matiz (hue) en una escala de 0 a 255 (no 0-360).
+    # El rango 14-125 cubre amarillo-verdoso, verde y verde-azulado, que
+    # es donde caen tanto las hojas sanas como la mayoría de manchas de
+    # enfermedad (amarillas/marrones claras). Se exige saturación y brillo
+    # mínimos para descartar blancos, grises y negros (paredes, cielo, ropa).
+    mascara_vegetal = (h >= 14) & (h <= 125) & (s >= 30) & (v >= 25)
+
+    porcentaje_vegetal = float(mascara_vegetal.mean()) * 100
+    es_planta = porcentaje_vegetal >= umbral_pct
+    return es_planta, porcentaje_vegetal
+
+
+def evaluar_si_es_planta(imagen_pil, modelo_filtro, clases_filtro):
+    """Decide si la imagen debe pasar al modelo de diagnóstico.
+    Prioriza el modelo binario Planta/No_Planta (más preciso) si ya está
+    disponible; si no, cae al filtro de respaldo por color.
+
+    Devuelve (es_planta: bool, detalle: str | None) donde 'detalle' es un
+    mensaje explicando por qué se bloqueó la imagen (None si se aceptó).
+    """
+    if modelo_filtro is not None and clases_filtro is not None:
+        entrada = preparar_imagen(imagen_pil)
+        predicciones = modelo_filtro.predict(entrada, verbose=0)[0]
+        indice = int(np.argmax(predicciones))
+        etiqueta = clases_filtro[indice]
+        confianza = float(predicciones[indice]) * 100
+
+        es_no_planta = "no" in etiqueta.lower()
+        if es_no_planta and confianza >= UMBRAL_NO_PLANTA:
+            return False, (
+                f"El modelo de filtro clasificó la imagen como "
+                f"'{etiqueta}' con {confianza:.0f}% de confianza."
+            )
+        return True, None
+
+    es_planta, pct = analizar_contenido_vegetal(imagen_pil)
+    if not es_planta:
+        return False, (
+            f"Filtro por color (respaldo): solo se detectó un {pct:.0f}% "
+            f"de tonos vegetales. Para un filtro más preciso, entrena y "
+            f"agrega el modelo binario 'modelo_filtro.h5'."
+        )
+    return True, None
 
 
 def generar_reporte_excel(df):
@@ -352,6 +442,8 @@ def main():
         st.error(f"No se pudo cargar el modelo. Detalle técnico: {e}")
         return
 
+    modelo_filtro, clases_filtro = cargar_modelo_filtro()
+
     modo = st.radio(
         "¿Cómo quieres analizar tu planta?",
         ["📷 Tomar foto con la cámara", "📁 Subir una foto"],
@@ -368,40 +460,59 @@ def main():
         imagen = Image.open(archivo)
         st.image(imagen, caption="Imagen analizada", use_container_width=True)
 
-        with st.spinner("Analizando la imagen..."):
-            entrada = preparar_imagen(imagen)
-            predicciones = modelo.predict(entrada)[0]
-            indice = int(np.argmax(predicciones))
-            confianza = float(predicciones[indice]) * 100
-            resultado = nombre_legible(clases[indice])
+        es_planta, detalle_filtro = evaluar_si_es_planta(imagen, modelo_filtro, clases_filtro)
 
-        st.subheader("Resultado")
-        es_sana = "healthy" in clases[indice].lower()
-        color_borde = VERDE_CLARO if es_sana else ALERTA
-        icono = "✅" if es_sana else "🍂"
-        titulo = "Planta sana" if es_sana else f"Posible enfermedad: {resultado}"
-        st.markdown(
-            f"""
-            <div class="tarjeta-resultado" style="--borde-color: {color_borde};">
-                <h3>{icono} {titulo}</h3>
-                <p>Confianza del modelo: <b>{confianza:.1f}%</b></p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.progress(min(int(confianza), 100))
+        if not es_planta:
+            st.markdown(
+                f"""
+                <div class="tarjeta-resultado" style="--borde-color: {ALERTA};">
+                    <h3>🚫 Esto no parece ser una hoja de planta</h3>
+                    <p>{detalle_filtro} Sube una foto donde la hoja se vea
+                    clara, ocupe la mayor parte del encuadre y con buena luz.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if modelo_filtro is None:
+                st.caption(
+                    "⚠️ Todavía no se detectó 'modelo_filtro.h5' en la carpeta — "
+                    "se está usando el filtro de respaldo por color, menos preciso."
+                )
+        else:
+            with st.spinner("Analizando la imagen..."):
+                entrada = preparar_imagen(imagen)
+                predicciones = modelo.predict(entrada)[0]
+                indice = int(np.argmax(predicciones))
+                confianza = float(predicciones[indice]) * 100
+                resultado = nombre_legible(clases[indice])
 
-        guardar_en_historial(imagen, resultado, confianza)
+            st.subheader("Resultado")
+            es_sana = "healthy" in clases[indice].lower()
+            color_borde = VERDE_CLARO if es_sana else ALERTA
+            icono = "✅" if es_sana else "🍂"
+            titulo = "Planta sana" if es_sana else f"Posible enfermedad: {resultado}"
+            st.markdown(
+                f"""
+                <div class="tarjeta-resultado" style="--borde-color: {color_borde};">
+                    <h3>{icono} {titulo}</h3>
+                    <p>Confianza del modelo: <b>{confianza:.1f}%</b></p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.progress(min(int(confianza), 100))
 
-        with st.expander("Ver todas las probabilidades"):
-            orden = np.argsort(predicciones)[::-1]
-            for i in orden[:5]:
-                st.write(f"- {nombre_legible(clases[i])}: {predicciones[i]*100:.1f}%")
+            guardar_en_historial(imagen, resultado, confianza)
 
-        st.caption(
-            "Este resultado es una ayuda automática y no reemplaza el "
-            "diagnóstico de un ingeniero agrónomo."
-        )
+            with st.expander("Ver todas las probabilidades"):
+                orden = np.argsort(predicciones)[::-1]
+                for i in orden[:5]:
+                    st.write(f"- {nombre_legible(clases[i])}: {predicciones[i]*100:.1f}%")
+
+            st.caption(
+                "Este resultado es una ayuda automática y no reemplaza el "
+                "diagnóstico de un ingeniero agrónomo."
+            )
 
     st.divider()
     mostrar_historial()

@@ -1,0 +1,2 @@
+0 Planta
+1 No planta
