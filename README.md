@@ -63,3 +63,16 @@ planta y ver el diagnóstico con el porcentaje de confianza.
   diagnóstico y porcentaje de confianza. Desde la propia app puedes
   abrir "📋 Ver historial de consultas guardadas" para revisarlas.
   Esto te sirve como evidencia de uso real para tu informe.
+
+## Actualización (modelo con 5 clases)
+
+- Clases actuales: Cordana, Sigatoka, Pestalotiopsis, Sanas y Otros (fotos que no son hojas: manos, objetos, fondos).
+- Se eliminó la clase Fusarium TR4: el modelo ya no la reconoce.
+- Si la foto se clasifica como **Otros**, o la confianza es menor a 70 %, la app pide otra foto y no la guarda en el historial. El umbral se cambia con `UMBRAL_CONFIANZA` en `app.py`.
+- Para calcular las métricas del modelo nuevo, crea la carpeta `pruebas/` con una subcarpeta por clase (mismo nombre que en `labels.txt`) con fotos que NO se usaron para entrenar, y ejecuta:
+
+```bash
+python evaluar_modelo.py
+```
+
+Esto genera `metricas_modelo.json`, `matriz_confusion.png` y `curvas_roc.png`, que la app muestra en "Validación del modelo". Las métricas del modelo anterior quedaron en `metricas_modelo_anterior/`.

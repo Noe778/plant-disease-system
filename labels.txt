@@ -1,5 +1,5 @@
 0 Cordana
-1 Healthy
+1 Sigatoka
 2 Pestalotiopsis
-3 Sigatoka
-4 FusariumTR4
+3 Sanas
+4 Otros
